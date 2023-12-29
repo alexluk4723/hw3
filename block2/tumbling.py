@@ -1,14 +1,16 @@
 from pyflink.common import SimpleStringSchema
 from pyflink.common.typeinfo import Types, RowTypeInfo
 from pyflink.common.watermark_strategy import WatermarkStrategy
-from pyflink.datastream import StreamExecutionEnvironment, TimeCharacteristic
+from pyflink.datastream import StreamExecutionEnvironment, TimeCharacteristic, CheckpointingMode
 from pyflink.datastream.connectors import DeliveryGuarantee
 from pyflink.datastream.connectors.kafka import KafkaSource, \
     KafkaOffsetsInitializer, KafkaSink, KafkaRecordSerializationSchema
 from pyflink.datastream.formats.json import JsonRowDeserializationSchema
-
-from pyflink.datastream.window import TumblingEventTimeWindows
+from pyflink.datastream.checkpoint_storage import CheckpointStorage
+from pyflink.datastream.window import TumblingEventTimeWindows, TumblingProcessingTimeWindows
 from pyflink.common import Time
+from pyflink.datastream.functions import MapFunction
+
 
 def tumbling_windows_temperature():
     env = StreamExecutionEnvironment.get_execution_environment()
@@ -18,6 +20,9 @@ def tumbling_windows_temperature():
     env.set_parallelism(1)
     env.set_stream_time_characteristic(TimeCharacteristic.EventTime)
     
+    env.enable_checkpointing(1000)
+    env.get_checkpoint_config().set_checkpointing_mode(CheckpointingMode.EXACTLY_ONCE)
+    env.get_checkpoint_config().set_checkpoint_storage(CheckpointStorage('file:///opt/pyflink/tmp/checkpoints/logs'))
 
     type_info: RowTypeInfo = Types.ROW_NAMED(['device_id', 'temperature', 'execution_time'],
                                              [Types.INT(), Types.DOUBLE(), Types.INT()])
@@ -35,20 +40,28 @@ def tumbling_windows_temperature():
     sink = KafkaSink.builder() \
         .set_bootstrap_servers('kafka:9092') \
         .set_record_serializer(KafkaRecordSerializationSchema.builder()
-                               .set_topic('itmo2023_result')
+                               .set_topic('itmo2023result')
                                .set_value_serialization_schema(SimpleStringSchema())
                                .build()
                                ) \
         .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE) \
         .build()
     ds = env.from_source(source, WatermarkStrategy.no_watermarks(), "Kafka Source")
-    ds.window_all(TumblingEventTimeWindows.of(Time.seconds(2))) \
+    ds.window_all(TumblingProcessingTimeWindows.of(Time.seconds(10)))\
         .reduce(
-            lambda t1, t2: t1 if t1[1] > t2[1] else t2,
-            output_type=Types.TUPLE([Types.INT(), Types.DOUBLE(), Types.INT()]),
+            lambda t1, t2: t1 if t1.temperature > t2.temperature else t2
         ) \
+        .map(TemperatureFunction(), Types.STRING()) \
         .sink_to(sink)
     env.execute_async("Devices preprocessing")
+
+class TemperatureFunction(MapFunction):
+
+    def map(self, value):
+        device_id, temperature, execution_time = value
+        return str({"device_id": device_id, "temperature": temperature - 273, "execution_time": execution_time})
+
+
 
 if __name__ == '__main__':
     tumbling_windows_temperature()

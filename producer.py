@@ -19,7 +19,7 @@ def write_data(producer):
                       key=dumps(device_id).encode('utf-8'),
                       value=cur_data)
         print(f"Data was sent to topic [{topic}]: {cur_data}")
-        sleep(1)
+        sleep(random.randint(1, 4))
 
 
 def create_producer():
